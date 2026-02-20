@@ -174,8 +174,8 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
 
         eb_abs = np.log2(self._eb_ratio) - max_abs_log_data * np.finfo(dtype).eps
 
-        if not np.isfinite(eb_abs):
-            eb_abs = 0.0
+        if not (np.isfinite(eb_abs) and eb_abs > 0.0):
+            eb_abs = np.array(eb_abs).dtype.type(0)
 
         threshold = np.minimum(
             np.nextafter(min_log_data, dtype.type(-np.inf)),
@@ -195,10 +195,10 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             )
         )
 
-        logs_encoded = logs_codec.encode(logs)
+        logs_encoded = logs_codec.encode(logs if eb_abs > 0 else a)
         logs_encoded = numcodecs.compat.ensure_ndarray(logs_encoded)
 
-        if save_signs:
+        if save_signs and (eb_abs > 0):
             signs_encoded = self._sign_codec.encode(
                 np.packbits(signs, axis=None, bitorder="big")
             )
@@ -206,9 +206,15 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         else:
             signs_encoded = None
 
-        # message: dtype shape logs_dtype logs_shape [padding] logs_encoded
-        #          signs_dtype [signs_shape [padding] signs_encoded]
-        #          eb_abs_dtype eb_abs threshold_dtype threshold
+        # message: dtype shape eb_abs_dtype eb_abs ...a
+        #  (eb_abs == 0) => ...b
+        #  (eb_abs >  0) => a... threshold_dtype threshold ...b
+        #         (True) => b... logs_encoded_dtype logs_encoded_shape [padding]
+        #                   logs_encoded ...c
+        #  (eb_abs == 0) => c... EOF
+        #  (!save_signs) => c... 0 EOF
+        #   (save_signs) => c... signs_dtype signs_shape [padding] signs_encoded
+        #                   EOF
         message: list[bytes | bytearray] = []
 
         message.append(leb128.u.encode(len(dtype.str)))
@@ -217,6 +223,23 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         message.append(leb128.u.encode(len(shape)))
         for s in shape:
             message.append(leb128.u.encode(s))
+
+        eb_abs = np.array(eb_abs)
+        message.append(leb128.u.encode(len(eb_abs.dtype.str)))
+        message.append(eb_abs.dtype.str.encode("ascii"))
+
+        # ensure that the encoded eb_abs value is encoded in little endian binary
+        message.append(eb_abs.astype(eb_abs.dtype.newbyteorder("<")).tobytes())
+
+        if eb_abs > 0:
+            threshold = np.array(threshold)
+            message.append(leb128.u.encode(len(threshold.dtype.str)))
+            message.append(threshold.dtype.str.encode("ascii"))
+
+            # ensure that the encoded threshold value is encoded in little endian binary
+            message.append(
+                threshold.astype(threshold.dtype.newbyteorder("<")).tobytes()
+            )
 
         message.append(leb128.u.encode(len(logs_encoded.dtype.str)))
         message.append(logs_encoded.dtype.str.encode("ascii"))
@@ -239,43 +262,32 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             logs_encoded.astype(logs_encoded.dtype.newbyteorder("<")).tobytes()
         )
 
-        if signs_encoded is None:
-            message.append(leb128.u.encode(0))
-        else:
-            message.append(leb128.u.encode(len(signs_encoded.dtype.str)))
-            message.append(signs_encoded.dtype.str.encode("ascii"))
+        if eb_abs > 0:
+            if signs_encoded is None:
+                message.append(leb128.u.encode(0))
+            else:
+                message.append(leb128.u.encode(len(signs_encoded.dtype.str)))
+                message.append(signs_encoded.dtype.str.encode("ascii"))
 
-            message.append(leb128.u.encode(signs_encoded.ndim))
-            for s in signs_encoded.shape:
-                message.append(leb128.u.encode(s))
+                message.append(leb128.u.encode(signs_encoded.ndim))
+                for s in signs_encoded.shape:
+                    message.append(leb128.u.encode(s))
 
-            # insert padding to align with signs itemsize
-            message.append(
-                b"\0"
-                * (
-                    signs_encoded.dtype.itemsize
-                    - (sum(len(m) for m in message) % signs_encoded.itemsize)
+                # insert padding to align with signs itemsize
+                message.append(
+                    b"\0"
+                    * (
+                        signs_encoded.dtype.itemsize
+                        - (sum(len(m) for m in message) % signs_encoded.itemsize)
+                    )
                 )
-            )
 
-            # ensure that the encoded signs values are encoded in little endian binary
-            message.append(
-                signs_encoded.astype(signs_encoded.dtype.newbyteorder("<")).tobytes()
-            )
-
-        eb_abs = np.array(eb_abs)
-        message.append(leb128.u.encode(len(eb_abs.dtype.str)))
-        message.append(eb_abs.dtype.str.encode("ascii"))
-
-        # ensure that the encoded eb_abs value is encoded in little endian binary
-        message.append(eb_abs.astype(eb_abs.dtype.newbyteorder("<")).tobytes())
-
-        threshold = np.array(threshold)
-        message.append(leb128.u.encode(len(threshold.dtype.str)))
-        message.append(threshold.dtype.str.encode("ascii"))
-
-        # ensure that the encoded threshold value is encoded in little endian binary
-        message.append(threshold.astype(threshold.dtype.newbyteorder("<")).tobytes())
+                # ensure that the encoded signs values are encoded in little endian binary
+                message.append(
+                    signs_encoded.astype(
+                        signs_encoded.dtype.newbyteorder("<")
+                    ).tobytes()
+                )
 
         return b"".join(message)
 
@@ -302,12 +314,43 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         b = numcodecs.compat.ensure_bytes(buf)
         b_io = BytesIO(b)
 
+        # message: dtype shape eb_abs_dtype eb_abs ...a
+        #  (eb_abs == 0) => ...b
+        #  (eb_abs >  0) => a... threshold_dtype threshold ...b
+        #         (True) => b... logs_encoded_dtype logs_encoded_shape [padding]
+        #                   logs_encoded ...c
+        #  (eb_abs == 0) => c... EOF
+        #  (!save_signs) => c... 0 EOF
+        #   (save_signs) => c... signs_dtype signs_shape [padding] signs_encoded
+        #                   EOF
+
         dtype = np.dtype(b_io.read(leb128.u.decode_reader(b_io)[0]).decode("ascii"))
         shape = tuple(
             leb128.u.decode_reader(b_io)[0]
             for _ in range(leb128.u.decode_reader(b_io)[0])
         )
         size = reduce(lambda a, b: a * b, shape, 1)
+
+        eb_abs_dtype = np.dtype(
+            b_io.read(leb128.u.decode_reader(b_io)[0]).decode("ascii")
+        )
+        eb_abs = np.frombuffer(
+            b_io.read(eb_abs_dtype.itemsize),
+            dtype=eb_abs_dtype.newbyteorder("<"),
+            count=1,
+        ).astype(eb_abs_dtype)[0]
+
+        if eb_abs > 0:
+            threshold_dtype = np.dtype(
+                b_io.read(leb128.u.decode_reader(b_io)[0]).decode("ascii")
+            )
+            threshold = np.frombuffer(
+                b_io.read(threshold_dtype.itemsize),
+                dtype=threshold_dtype.newbyteorder("<"),
+                count=1,
+            ).astype(threshold_dtype)[0]
+        else:
+            threshold = None
 
         logs_dtype = np.dtype(
             b_io.read(leb128.u.decode_reader(b_io)[0]).decode("ascii")
@@ -331,48 +374,33 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             .reshape(logs_shape)
         )
 
-        signs_dtype_len = leb128.u.decode_reader(b_io)[0]
-
-        if signs_dtype_len == 0:
+        if eb_abs == 0:
             signs_encoded = None
         else:
-            signs_dtype = np.dtype(b_io.read(signs_dtype_len).decode("ascii"))
-            signs_shape = tuple(
-                leb128.u.decode_reader(b_io)[0]
-                for _ in range(leb128.u.decode_reader(b_io)[0])
-            )
-            signs_size = reduce(lambda a, b: a * b, signs_shape, 1)
+            signs_dtype_len = leb128.u.decode_reader(b_io)[0]
 
-            # remove padding to align with signs itemsize
-            b_io.read(signs_dtype.itemsize - (b_io.tell() % signs_dtype.itemsize))
-
-            signs_encoded = (
-                np.frombuffer(
-                    b_io.read(signs_size * signs_dtype.itemsize),
-                    dtype=signs_dtype.newbyteorder("<"),
-                    count=signs_size,
+            if signs_dtype_len == 0:
+                signs_encoded = None
+            else:
+                signs_dtype = np.dtype(b_io.read(signs_dtype_len).decode("ascii"))
+                signs_shape = tuple(
+                    leb128.u.decode_reader(b_io)[0]
+                    for _ in range(leb128.u.decode_reader(b_io)[0])
                 )
-                .astype(signs_dtype)
-                .reshape(signs_shape)
-            )
+                signs_size = reduce(lambda a, b: a * b, signs_shape, 1)
 
-        eb_abs_dtype = np.dtype(
-            b_io.read(leb128.u.decode_reader(b_io)[0]).decode("ascii")
-        )
-        eb_abs = np.frombuffer(
-            b_io.read(eb_abs_dtype.itemsize),
-            dtype=eb_abs_dtype.newbyteorder("<"),
-            count=1,
-        ).astype(eb_abs_dtype)[0]
+                # remove padding to align with signs itemsize
+                b_io.read(signs_dtype.itemsize - (b_io.tell() % signs_dtype.itemsize))
 
-        threshold_dtype = np.dtype(
-            b_io.read(leb128.u.decode_reader(b_io)[0]).decode("ascii")
-        )
-        threshold = np.frombuffer(
-            b_io.read(threshold_dtype.itemsize),
-            dtype=threshold_dtype.newbyteorder("<"),
-            count=1,
-        ).astype(threshold_dtype)[0]
+                signs_encoded = (
+                    np.frombuffer(
+                        b_io.read(signs_size * signs_dtype.itemsize),
+                        dtype=signs_dtype.newbyteorder("<"),
+                        count=signs_size,
+                    )
+                    .astype(signs_dtype)
+                    .reshape(signs_shape)
+                )
 
         logs = np.empty(shape, dtype=dtype)
 
@@ -385,13 +413,14 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         )
         logs_codec.decode(logs_encoded, out=logs)
 
-        np.exp2(
-            logs,
-            out=logs,
-            where=(np.isfinite(logs) & (logs >= threshold)),
-            casting="equiv",
-        )
-        logs[np.isfinite(logs) & (logs < threshold)] = 0
+        if threshold is not None:
+            np.exp2(
+                logs,
+                out=logs,
+                where=(np.isfinite(logs) & (logs >= threshold)),
+                casting="equiv",
+            )
+            logs[np.isfinite(logs) & (logs < threshold)] = 0
 
         if signs_encoded is not None:
             packed_signs = np.empty((size + 7) // 8, dtype=np.uint8)

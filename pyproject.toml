@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "numcodecs-pw-ratio"
-version = "0.1.0"
+version = "0.2.0"
 description = "Meta codec for bounding the pointwise ratio error for the `numcodecs` buffer compression API"
 readme = "README.md"
 license = "MPL-2.0"

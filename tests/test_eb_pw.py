@@ -50,6 +50,15 @@ def check_roundtrip(data: np.ndarray, lossless_log_codec=False):
                 <= np.log2(eb_ratio),
                 where=(np.isfinite(data) & (data != 0)),
             )
+            assert np.all(
+                (data / decoded) <= eb_ratio, where=(np.isfinite(data) & (data != 0))
+            )
+            assert np.all(
+                (decoded / data) <= eb_ratio, where=(np.isfinite(data) & (data != 0))
+            )
+
+        if eb_ratio == 1:
+            assert np.all(data == decoded, where=(~np.isnan(data)))
 
 
 def test_roundtrip():
@@ -57,6 +66,7 @@ def test_roundtrip():
     check_roundtrip(np.zeros((0,)))
     check_roundtrip(np.arange(1000).reshape(10, 10, 10).astype(np.float64))
     check_roundtrip((np.arange(1000) - 500).reshape(10, 10, 10).astype(np.float64))
+    check_roundtrip(np.sin(np.linspace(np.pi * -3, np.pi * 3, 1000)).astype(np.float32))
     check_roundtrip(np.array([4.2, -2.4, np.nan, -np.nan, 0.0, -0.0]))
     check_roundtrip(np.array([np.inf, -np.inf, np.nan, -np.nan, 0.0, -0.0]))
     check_roundtrip(
