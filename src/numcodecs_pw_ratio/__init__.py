@@ -32,9 +32,9 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
     The `log_codec` configuration should include a marker, `eb_abs_marker`,
     which is replaced with the translated absolute error bound.
 
-    The implementation of the meta-codec is based on Ling et al.[^1] and adopted
-    from `libpressio`[^2]'s `pw_rel_compressor_plugin`[^3] meta-compressor
-    plugin.
+    The implementation of the meta-codec is based on Liang et al.[^1] and
+    adopted from `libpressio`[^2]'s `pw_rel_compressor_plugin`[^3]
+    meta-compressor plugin.
 
     A ratio error bound guarantees that the ratios between the original and the
     decoded values as well as their inverse ratios are less than or equal to
