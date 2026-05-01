@@ -9,12 +9,17 @@ def test_from_config():
             id="pw_ratio",
             eb_ratio=1.1,
             eb_abs_marker="$eb_abs",
-            log_codec=dict(id="zlib"),
-            sign_codec=dict(id="zlib"),
+            log_codec=dict(id="zlib", level=6),
+            sign_codec=dict(id="zlib", level=6),
         )
     )
     assert codec.__class__.__name__ == "PointwiseRatioErrorBoundedCodec"
     assert codec.__class__.__module__ == "numcodecs_pw_ratio"
+
+    assert (
+        repr(codec)
+        == "PointwiseRatioErrorBoundedCodec(eb_ratio=1.1, eb_abs_marker='$eb_abs', log_codec={'id': 'zlib', 'level': 6}, sign_codec=Zlib(level=6))"
+    )
 
 
 def check_roundtrip(data: np.ndarray, lossless_log_codec=False):

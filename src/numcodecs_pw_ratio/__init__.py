@@ -458,6 +458,9 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             sign_codec=self._sign_codec.get_config(),
         )
 
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(eb_ratio={self._eb_ratio!r}, eb_abs_marker={self._eb_abs_marker!r}, log_codec={self._log_codec!r}, sign_codec={self._sign_codec!r})"
+
     def map(
         self, mapper: Callable[[Codec], Codec]
     ) -> "PointwiseRatioErrorBoundedCodec":
