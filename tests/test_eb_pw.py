@@ -1,4 +1,6 @@
 import numcodecs
+import numcodecs.abc
+import numcodecs.compat
 import numcodecs.registry
 import numpy as np
 
@@ -18,11 +20,11 @@ def test_from_config():
 
     assert (
         repr(codec)
-        == "PointwiseRatioErrorBoundedCodec(eb_ratio=1.1, eb_abs_marker='$eb_abs', log_codec={'id': 'zlib', 'level': 6}, sign_codec=Zlib(level=6))"
+        == "PointwiseRatioErrorBoundedCodec(eb_ratio=1.1, eb_abs_marker='$eb_abs', log_codec={'id': 'zlib', 'level': 6}, sign_codec=Zlib(level=6), pack_signs=True)"
     )
 
 
-def check_roundtrip(data: np.ndarray, lossless_log_codec=False):
+def check_roundtrip(data: np.ndarray, lossless_log_codec=False, pack_signs=True):
     for eb_ratio in [1.0, 1.1, 2.0, 10.0, 100.0]:
         codec = numcodecs.registry.get_codec(
             dict(
@@ -33,6 +35,7 @@ def check_roundtrip(data: np.ndarray, lossless_log_codec=False):
                 if lossless_log_codec
                 else dict(id="sz3.rs", eb_mode="abs", eb_abs="$eb_abs"),
                 sign_codec=dict(id="zlib"),
+                pack_signs=pack_signs,
             )
         )
 
@@ -87,3 +90,46 @@ def test_roundtrip():
         ),
         lossless_log_codec=True,
     )
+
+
+def test_unpacked_signs():
+    data = np.array([[1.0, -2.0, 3.0], [-4.0, 5.0, -6.0], [0.0, -0.0, np.nan]])
+    check_roundtrip(data, lossless_log_codec=True, pack_signs=False)
+    check_roundtrip(data, lossless_log_codec=False, pack_signs=False)
+
+    # the sign codec receives the boolean sign array of the data's shape
+    class RecordingCodec(numcodecs.abc.Codec):
+        codec_id = "recording-signs-test"
+
+        def __init__(self):
+            self.seen = None
+
+        def encode(self, buf):
+            self.seen = np.array(buf, copy=True)
+            return self.seen.tobytes()
+
+        def decode(self, buf, out=None):
+            return numcodecs.compat.ndarray_copy(
+                np.frombuffer(buf, dtype=self.seen.dtype).reshape(self.seen.shape), out
+            )
+
+    for pack_signs in (True, False):
+        sign_codec = RecordingCodec()
+        codec = numcodecs.registry.get_codec(
+            dict(
+                id="pw_ratio",
+                eb_ratio=1.1,
+                eb_abs_marker="$eb_abs",
+                log_codec=dict(id="zlib"),
+                sign_codec=sign_codec,
+                pack_signs=pack_signs,
+            )
+        )
+        decoded = codec.decode(codec.encode(data))
+        assert np.all(np.signbit(data) == np.signbit(decoded))
+        if pack_signs:
+            assert sign_codec.seen.dtype == np.uint8 and sign_codec.seen.ndim == 1
+        else:
+            assert (
+                sign_codec.seen.dtype == np.bool and sign_codec.seen.shape == data.shape
+            )

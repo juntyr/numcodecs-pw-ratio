@@ -96,6 +96,12 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         the logarithms of the data.
     sign_codec : dict | Codec
         The configuration or instantiated codec that encodes the data signs.
+    pack_signs : bool, optional
+        Whether the [boolean][numpy.bool] sign array is packed into bytes
+        with [`np.packbits`][numpy.packbits] before it is passed to the
+        `sign_codec` (the default). If [`False`][False], the `sign_codec`
+        receives the boolean array of the data's shape directly, which allows
+        using a bitmap codec that exploits the spatial structure of the signs.
     """
 
     __slots__: tuple[str, ...] = (
@@ -103,12 +109,14 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         "_eb_abs_marker",
         "_log_codec",
         "_sign_codec",
+        "_pack_signs",
         "_mapper",
     )
     _eb_ratio: float
     _eb_abs_marker: str
     _log_codec: dict
     _sign_codec: Codec
+    _pack_signs: bool
     _mapper: Callable[[Codec], Codec]
 
     codec_id: ClassVar[str] = "pw_ratio"  # type: ignore
@@ -119,6 +127,7 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         eb_abs_marker: str,
         log_codec: dict,
         sign_codec: dict | Codec,
+        pack_signs: bool = True,
     ):
         if eb_ratio < 1:
             raise ValueError("eb_ratio must be >= 1")
@@ -134,6 +143,7 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             if isinstance(sign_codec, Codec)
             else numcodecs.registry.get_codec(sign_codec)
         )
+        self._pack_signs = bool(pack_signs)
         self._mapper = lambda x: x
 
     def encode(self, buf: Buffer) -> bytes:  # type: ignore
@@ -201,6 +211,8 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
         if save_signs and (eb_abs > 0):
             signs_encoded = self._sign_codec.encode(
                 np.packbits(signs, axis=None, bitorder="big")
+                if self._pack_signs
+                else signs
             )
             signs_encoded = numcodecs.compat.ensure_ndarray(signs_encoded)
         else:
@@ -423,15 +435,20 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             logs[np.isfinite(logs) & (logs < threshold)] = 0
 
         if signs_encoded is not None:
-            packed_signs = np.empty((size + 7) // 8, dtype=np.uint8)
+            if self._pack_signs:
+                packed_signs = np.empty((size + 7) // 8, dtype=np.uint8)
 
-            self._sign_codec.decode(signs_encoded, out=packed_signs)
+                self._sign_codec.decode(signs_encoded, out=packed_signs)
 
-            signs = (
-                np.unpackbits(packed_signs, axis=None, count=size, bitorder="big")
-                .astype(np.bool)
-                .reshape(shape)
-            )
+                signs = (
+                    np.unpackbits(packed_signs, axis=None, count=size, bitorder="big")
+                    .astype(np.bool)
+                    .reshape(shape)
+                )
+            else:
+                signs = np.empty(shape, dtype=np.bool)
+
+                self._sign_codec.decode(signs_encoded, out=signs)
 
             np.negative(logs, out=logs, where=signs, casting="equiv")
 
@@ -456,10 +473,11 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             eb_abs_marker=self._eb_abs_marker,
             log_codec=copy.deepcopy(self._log_codec),
             sign_codec=self._sign_codec.get_config(),
+            pack_signs=self._pack_signs,
         )
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(eb_ratio={self._eb_ratio!r}, eb_abs_marker={self._eb_abs_marker!r}, log_codec={self._log_codec!r}, sign_codec={self._sign_codec!r})"
+        return f"{type(self).__name__}(eb_ratio={self._eb_ratio!r}, eb_abs_marker={self._eb_abs_marker!r}, log_codec={self._log_codec!r}, sign_codec={self._sign_codec!r}, pack_signs={self._pack_signs!r})"
 
     def map(
         self, mapper: Callable[[Codec], Codec]
@@ -499,6 +517,7 @@ class PointwiseRatioErrorBoundedCodec(Codec, CodecCombinatorMixin):
             self._eb_abs_marker,
             copy.deepcopy(self._log_codec),
             mapper(self._sign_codec),
+            pack_signs=self._pack_signs,
         )
 
         old_mapper = self._mapper
